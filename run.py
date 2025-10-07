@@ -3,7 +3,7 @@ import logging
 
 # 初始化配置
 # logging.basicConfig(format='%(filename)s:%(lineno)d - %(levelname)s: %(message)s', level=logging.DEBUG)
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(format='%(filename)s:%(lineno)d - %(levelname)s: %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
@@ -308,7 +308,7 @@ def code_filter(data_list, code):
     return result_list
 
 
-def fifo(data_list, start_time, end_time):
+def FIFO(data_list, start_time, end_time):
     # 先进先出
     # 建立两个队列，一个是买入队列，一个是卖出队列
     # 遍历数据，如果是买入，则放入买入队列，如果是卖出，则放入卖出队列
@@ -317,7 +317,7 @@ def fifo(data_list, start_time, end_time):
     buy_list = []
     sell_list = []
     for data in data_list:
-        # logger.debug(data)
+        logger.debug(data)
         if data.direction == '买入':
             buy_list.append(data)
         else:
@@ -410,6 +410,62 @@ def fifo(data_list, start_time, end_time):
     return tax_data
 
 
+def MA(data_list, start_time, end_time):
+    # 移动加权平均
+    # 维护持仓量和持仓均价
+    # 遍历数据，如果是买入，则更新持仓量和持仓均价，如果是卖出，则计算盈利，更新持仓量和持仓均价。
+    # 盈利
+    capital_gains = 0
+    # 手续费
+    total_fee = 0
+    # 持仓量
+    shares_held = 0
+    # 持仓成本
+    avg_price = 0
+    for data in data_list:
+        logger.debug(data)
+        if data.time > datetime.datetime.strptime(end_time, '%Y%m%d'):
+            continue
+        if data.direction == '买入':
+            new_amount = shares_held * avg_price + data.price * data.shares_held
+            shares_held += data.shares_held
+            avg_price = new_amount / shares_held
+        else:
+            # 时间窗口内的交易才需要统计盈利
+            if time_check(data.time, start_time, end_time):
+                gain = (data.price - avg_price) * data.shares_held
+                capital_gains += gain
+                logger.debug(f"单笔盈利: {gain}")
+                logger.debug(f"盈利汇总: {capital_gains}")
+            shares_held -= data.shares_held
+            if shares_held < 0 and data.time > datetime.datetime.strptime(start_time, '%Y%m%d'):
+                logger.error(f"持仓量小于0, {data}")
+            if shares_held <= 0:
+                shares_held = 0
+                avg_price = 0
+        logger.debug(f"最新持有数量: {shares_held}, 最新持有成本: {avg_price}, 最新盈利: {capital_gains}")
+        # 时间窗口内的交易才需要统计交易费用
+        if time_check(data.time, start_time, end_time):
+            total_fee += data.fee
+        logger.debug(f"手续费汇总: {total_fee}")
+
+    tax_data = None
+    if total_fee > 0:
+        logger.info("=============")
+        logger.info(f"股票代码: {data_list[0].code}, 股票名称: {data_list[0].name}")
+        logger.info(f"手续费: {total_fee}")
+        logger.info(f"盈利: {capital_gains}")
+        logger.info(f"总盈利: {(capital_gains - total_fee)}")
+        logger.info(f"拟缴税费: {(capital_gains - total_fee) * 0.2}")
+        logger.info(f"最新持有数量: {shares_held}")
+        if shares_held > 0:
+            logger.info(f"最新持有成本: {avg_price, avg_price * shares_held}")
+
+        tax_data = TaxData(data_list[0].code, data_list[0].name, capital_gains, total_fee,
+                           data_list[0].currency)
+    return tax_data
+
+
 def do_something(data_list):
     fee_sum = 0
     amount_sum = 0
@@ -479,8 +535,8 @@ if __name__ == '__main__':
             code_hash[i.code] = i.name
 
     tax_list = []
-    code_list = ["00763"]
-    # code_list = ["00285"]
+    # code_list = ["07552"]
+    code_list = ["02423"]
     start_time = "20250101"
     end_time = "20251231"
     for i in code_hash:
@@ -489,14 +545,16 @@ if __name__ == '__main__':
         # # 指定股票代码
         code_data = code_filter(ganggu_data, code)
 
-        tax_data = fifo(code_data, start_time, end_time)
+        # tax_data = FIFO(code_data, start_time, end_time)
+        tax_data = MA(code_data, start_time, end_time)
         if tax_data is not None:
             tax_list.append(tax_data)
 
     total_fee = 0
     capital_gains = 0
+    logger.info("=============")
     for i in tax_list:
-        logger.debug(i)
+        logger.info(i)
         if i.currency == '港元':
             total_fee += i.total_fee
             capital_gains += i.capital_gains
@@ -509,3 +567,5 @@ if __name__ == '__main__':
     # do_something(meigu_data)
 
 #     todo: 新股申购的数据没统计在内
+# todo: 卖空的数据处理是否正确？
+# 如果发生了配股操作，持有股数会变多。目前还无法处理。由此带来的影响是税费后移至清零时完全结清。税费总额不变。
