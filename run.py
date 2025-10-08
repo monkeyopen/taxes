@@ -422,14 +422,41 @@ def MA(data_list, start_time, end_time):
     shares_held = 0
     # 持仓成本
     avg_price = 0
+    shares_held_for_short_sell = 0
+    short_sell = 0
+
     for data in data_list:
         logger.debug(data)
         if data.time > datetime.datetime.strptime(end_time, '%Y%m%d'):
             continue
         if data.direction == '买入':
-            new_amount = shares_held * avg_price + data.price * data.shares_held
-            shares_held += data.shares_held
-            avg_price = new_amount / shares_held
+            if short_sell == 0:
+                # 正常买入
+                new_amount = shares_held * avg_price + data.price * data.shares_held
+                shares_held += data.shares_held
+                avg_price = new_amount / shares_held
+            else:
+                # 卖空后平仓
+                if time_check(data.time, start_time, end_time):
+                    gain = (avg_price - data.price) * data.shares_held
+                    capital_gains += gain
+                    logger.debug(f"单笔盈利: {gain}")
+                    logger.debug(f"盈利汇总: {capital_gains}")
+                shares_held_for_short_sell -= data.shares_held
+                assert shares_held_for_short_sell >= 0, f"平仓数量大于持仓数量, {data}"
+                if shares_held_for_short_sell == 0:
+                    # 平仓完成
+                    short_sell = 0
+                    shares_held = 0
+                    avg_price = 0
+
+        elif data.direction == '卖空':
+            assert shares_held == 0, f"持有数量不为0，不能卖空, {data}"
+            new_amount = shares_held_for_short_sell * avg_price + data.price * data.shares_held
+            shares_held_for_short_sell += data.shares_held
+            avg_price = new_amount / shares_held_for_short_sell
+            # 置为卖空状态
+            short_sell = 1
         else:
             # 时间窗口内的交易才需要统计盈利
             if time_check(data.time, start_time, end_time):
@@ -464,6 +491,81 @@ def MA(data_list, start_time, end_time):
         tax_data = TaxData(data_list[0].code, data_list[0].name, capital_gains, total_fee,
                            data_list[0].currency)
     return tax_data
+
+
+def tax_for_ganggu(time_window_data, start_time="20250101", end_time="20251231"):
+    ganggu_data = [x for x in time_window_data if x.currency == '港元']
+    code_hash = {}
+    for i in ganggu_data:
+        if i.code not in code_hash:
+            code_hash[i.code] = i.name
+
+    tax_list = []
+    # code_list = ["07552"]
+    code_list = ["02423"]
+    for i in code_hash:
+        # code = "01347"
+        code = i
+        # # 指定股票代码
+        code_data = code_filter(ganggu_data, code)
+
+        # tax_data = FIFO(code_data, start_time, end_time)
+        tax_data = MA(code_data, start_time, end_time)
+        if tax_data is not None:
+            tax_list.append(tax_data)
+
+    total_fee = 0
+    capital_gains = 0
+    logger.info("=============")
+    for i in tax_list:
+        logger.info(i)
+        if i.currency == '港元':
+            total_fee += i.total_fee
+            capital_gains += i.capital_gains
+    logger.info("=============")
+    logger.info(f"总手续费: {total_fee}")
+    logger.info(f"总盈利: {(capital_gains - total_fee)}")
+    logger.info(f"税费: {(capital_gains - total_fee) * 0.2}")
+
+    return (total_fee, capital_gains)
+
+
+def tax_for_meigu(time_window_data, start_time="20250101", end_time="20251231"):
+    meigu_data = [x for x in time_window_data if x.currency == '美元']
+    code_hash = {}
+    for i in meigu_data:
+        if i.code not in code_hash:
+            code_hash[i.code] = i.name
+
+    tax_list = []
+    code_list = ["SMCI"]
+    # code_list = ["NVDA", "SQQQ"]
+
+    for i in code_hash:
+        # code = "01347"
+        code = i
+        # # 指定股票代码
+        code_data = code_filter(meigu_data, code)
+
+        # tax_data = FIFO(code_data, start_time, end_time)
+        tax_data = MA(code_data, start_time, end_time)
+        if tax_data is not None:
+            tax_list.append(tax_data)
+
+    total_fee = 0
+    capital_gains = 0
+    logger.info("=============")
+    for i in tax_list:
+        logger.info(i)
+        if i.currency == '美元':
+            total_fee += i.total_fee
+            capital_gains += i.capital_gains
+    logger.info("=============")
+    logger.info(f"总手续费: {total_fee}")
+    logger.info(f"总盈利: {(capital_gains - total_fee)}")
+    logger.info(f"税费: {(capital_gains - total_fee) * 0.2}")
+
+    return (total_fee, capital_gains)
 
 
 def do_something(data_list):
@@ -527,45 +629,21 @@ if __name__ == '__main__':
     # 时间窗口
     time_window_data = time_window(data_list, "20100101", "20251231")
     time_window_data.sort(key=lambda x: x.time)
-
-    ganggu_data = [x for x in time_window_data if x.currency == '港元']
-    code_hash = {}
-    for i in ganggu_data:
-        if i.code not in code_hash:
-            code_hash[i.code] = i.name
-
-    tax_list = []
-    # code_list = ["07552"]
-    code_list = ["02423"]
     start_time = "20250101"
     end_time = "20251231"
-    for i in code_hash:
-        # code = "01347"
-        code = i
-        # # 指定股票代码
-        code_data = code_filter(ganggu_data, code)
+    (ganggu_fee, ganggu_capital_gains) = tax_for_ganggu(time_window_data, start_time, end_time)
+    # todo: 新股申购的数据没统计在内
+    # todo: 卖空的数据处理是否正确？
+    # 如果发生了配股操作，持有股数会变多。目前还无法处理。由此带来的影响是税费后移至清零时完全结清。税费总额不变。
+    (meigu_fee, meigu_capital_gains) = tax_for_meigu(time_window_data, start_time, end_time)
 
-        # tax_data = FIFO(code_data, start_time, end_time)
-        tax_data = MA(code_data, start_time, end_time)
-        if tax_data is not None:
-            tax_list.append(tax_data)
+    # 合并数据
+    # 美元兑换港元汇率
+    rate = 7.78
+    total_fee = ganggu_fee + meigu_fee * rate
+    capital_gains = ganggu_capital_gains + meigu_capital_gains * rate
 
-    total_fee = 0
-    capital_gains = 0
-    logger.info("=============")
-    for i in tax_list:
-        logger.info(i)
-        if i.currency == '港元':
-            total_fee += i.total_fee
-            capital_gains += i.capital_gains
     logger.info("=============")
     logger.info(f"总手续费: {total_fee}")
     logger.info(f"总盈利: {(capital_gains - total_fee)}")
     logger.info(f"税费: {(capital_gains - total_fee) * 0.2}")
-
-    # meigu_data = [x for x in time_window_data if x.currency == '美元']
-    # do_something(meigu_data)
-
-#     todo: 新股申购的数据没统计在内
-# todo: 卖空的数据处理是否正确？
-# 如果发生了配股操作，持有股数会变多。目前还无法处理。由此带来的影响是税费后移至清零时完全结清。税费总额不变。
